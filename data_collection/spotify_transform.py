@@ -39,14 +39,21 @@ with open(input_file, 'r', encoding='utf-8') as f:
 tracks = []
 for track in data:
     audio_features = track.get("audio_features", {})
+
+    # extract the year from the release date
+    album_release_date = track["album"]["release_date"]
+    release_year = album_release_date.split("-")[0] if album_release_date else None
+
+    # append all details from JSON
     tracks.append({
         "track_id": track["id"],
         "track_name": track["name"],
+        "artist_names": ", ".join([name for name in track.get("artist_names", []) if name]),
         "popularity": track["popularity"],
         "duration_ms": track["duration_ms"],
         "explicit": track["explicit"],
         "album_name": track["album"]["name"],
-        "album_release_date": track["album"]["release_date"],
+        "year": release_year,
         "album_type": track["album"]["album_type"],
         "danceability": audio_features.get("danceability", None),
         "energy": audio_features.get("energy", None),
@@ -60,14 +67,14 @@ for track in data:
         "valence": audio_features.get("valence", None),
         "tempo": audio_features.get("tempo", None),
         "time_signature": audio_features.get("time_signature", None),
-        "artist_names": ", ".join(track.get("artist_names", [])),  # Concatenate artist names into a single string
     })
 
 # convert the extracted data into a DataFrame
 tracks_df = pd.DataFrame(tracks)
 
-# create a timestamped filename
-filename = "spotify_dataset_" + datetime.now().strftime("%Y%m%d_%H%M%S") + ".csv"
+# create the output filename based on the input filename, changing .json to .csv
+base_filename = os.path.splitext(json_files[0])[0]  # Remove the .json extension
+filename = base_filename + ".csv"  # Add the .csv extension
 tracks_csv_path = os.path.join(output_dir, filename)
 
 # save the DataFrame to a CSV file

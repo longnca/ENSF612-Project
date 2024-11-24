@@ -21,6 +21,16 @@ from datetime import datetime
 import time
 import logging
 
+# set the delays between each API request to respect API rate limits
+GLOBAL_API_DELAY = 0.2  # 0.2 second
+
+# choose the range of the years that you want to fetch data
+YEAR_START = 1961
+YEAR_END = YEAR_START + 9
+
+# choose the limit of playlists per year that you want to fetch
+PLAYLIST_LIMIT = 50
+
 # Setup logging
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 
@@ -33,21 +43,35 @@ client_secret = os.environ.get('client_secret')
 client_credentials_manager = SpotifyClientCredentials(client_id=client_id, client_secret=client_secret)
 sp = spotipy.Spotify(client_credentials_manager=client_credentials_manager)
 
-def fetch_playlists_by_year(year, limit=10):
+
+def fetch_playlists_by_year(year, limit=PLAYLIST_LIMIT, query_template="{year}"):
     """
     Search for playlists containing a specific year in their title.
 
     :param year: the year to search for in playlist titles.
-    :param limit: maximum nuber of playlists to return.
+    :param limit: maximum number of playlists to return.
+    :param query_template: template for formatting the query string.
     :return: list of playlist IDs.
     """
     logging.info(f"Searching for playlists with year: {year}")
-    query = f"{year}"
+    query = query_template.format(year=year)
     results = sp.search(q=query, type='playlist', limit=limit)
 
-    playlist_ids = [playlist['id'] for playlist in results['playlists']['items']]
+    # log the response to understand why it might be None
+    if not results or 'playlists' not in results or 'items' not in results['playlists']:
+        logging.warning(f"No playlists found for year {year}. API response: {results}")
+        return []
+
+    # filter playlists to include only those where the title contains the year
+    playlist_ids = [
+        playlist['id']
+        for playlist in results['playlists']['items']
+        if playlist and 'name' in playlist and str(year) in playlist['name']
+    ]
+
     logging.info(f"Found {len(playlist_ids)} playlists for year {year}")
     return playlist_ids
+
 
 def fetch_tracks_batch(playlist_id):
     """
@@ -64,30 +88,36 @@ def fetch_tracks_batch(playlist_id):
     while results:
         for item in results['items']:
             track = item['track']
-            if track:
+            if track and track.get('id'):
                 all_tracks.append(track)
 
-        # Respect API rate limits by pausing if needed
-        time.sleep(0.1)
+        # pause (if needed) to respect API rate limits of Spotify
+        time.sleep(GLOBAL_API_DELAY)
         results = sp.next(results) if results['next'] else None
 
     return all_tracks
 
+
 def fetch_audio_features_batch(track_ids):
     """
     Fetch audio features for a list of track IDs in batches.
+    Spotify API allows up to 100 IDs per request so we can set the batch size up to 100.
 
     :param track_ids: list of track IDs that contain audio features.
     :return: dict of audio features with track IDs as keys.
     """
     logging.info(f"Fetching audio features for {len(track_ids)} tracks")
+
+    # filter out any None values from track_ids
+    track_ids = [track_id for track_id in track_ids if track_id]
+
     audio_features = {}
-    batch_size = 100  # note: Spotify API allows up to 100 IDs per request
+    batch_size = 100
 
     for i in range(0, len(track_ids), batch_size):
         batch_ids = track_ids[i:i + batch_size]
         features = sp.audio_features(batch_ids)
-        time.sleep(0.2)  # pause to respect API rate limits
+        time.sleep(GLOBAL_API_DELAY)
 
         for feature in features:
             if feature:
@@ -111,7 +141,7 @@ def fetch_tracks_from_playlists(playlist_ids):
         tracks = fetch_tracks_batch(playlist_id)
         all_tracks.extend(tracks)
 
-    # deduplicate track IDs
+    # deduplicate track IDs to only contain unique track IDs
     track_ids = list({track['id'] for track in all_tracks if track['id'] not in seen_track_ids})
     seen_track_ids.update(track_ids)
 
@@ -128,7 +158,7 @@ def fetch_tracks_from_playlists(playlist_ids):
     return all_tracks
 
 
-def fetch_tracks_from_playlists_by_year(year_range, limit_per_year=5):
+def fetch_tracks_from_playlists_by_year(year_range, limit_per_year=PLAYLIST_LIMIT):
     """
     Fetch tracks, audio features, and artist details dynamically based on a range of years.
 
@@ -140,19 +170,25 @@ def fetch_tracks_from_playlists_by_year(year_range, limit_per_year=5):
     seen_playlist_ids = set()
 
     for year in year_range:
-        # get playlists for the current year
-        playlist_ids = fetch_playlists_by_year(year, limit=limit_per_year)
+        # looking for the playlists "Top Hits of [the year]"
+        # you can adjust if needed
+        query_template = "Top Hits of {year}"
+        playlist_ids = fetch_playlists_by_year(year, limit=limit_per_year, query_template=query_template)
+
+        # note: if not using query_template, un-comment the next line and comment out the previouse lines
+        # playlist_ids = fetch_playlists_by_year(year, limit=limit_per_year)
 
         # deduplicate playlist IDs
         unique_playlist_ids = [pid for pid in playlist_ids if pid not in seen_playlist_ids]
         seen_playlist_ids.update(unique_playlist_ids)
 
+        if not unique_playlist_ids:
+            logging.info(f"No playlists found for year {year}")
+            continue  # Skip this year if no playlists are found
+
         # fetch tracks and artist details from playlists
-        if unique_playlist_ids:
-            logging.info(f"Fetching tracks from {len(unique_playlist_ids)} playlists for year {year}")
-            all_tracks.extend(fetch_tracks_from_playlists(unique_playlist_ids))
-        else:
-            logging.info(f"No new playlists found for year {year}")
+        logging.info(f"Fetching tracks from {len(unique_playlist_ids)} playlists for year {year}")
+        all_tracks.extend(fetch_tracks_from_playlists(unique_playlist_ids))
 
     return all_tracks
 
@@ -179,25 +215,32 @@ def save_data_to_file(data, output_dir, filename, format="json"):
     logging.info(f"Data successfully saved to {file_path}")
     return file_path
 
+
 def main():
-    start_time = time.time()  # start timing the main function
+    # start timing the main function
+    start_time = time.time()
 
     # define year range
-    YEAR_START = 2000
-    YEAR_END = 2002
     year_range = range(YEAR_START, YEAR_END + 1)
 
     # fetch tracks dynamically by year
     spotify_data = fetch_tracks_from_playlists_by_year(year_range)
 
     # create a timestamped filename
-    filename = "spotify_dataset_by_year_" + datetime.now().strftime("%Y%m%d_%H%M%S") + ".json"
+    filename = ("spotify_dataset_by_year_"
+                + str(YEAR_START)
+                + "-"
+                + str(YEAR_END)
+                + "_"
+                + datetime.now().strftime("%Y%m%d_%H%M%S")
+                + ".json")
     output_dir = "./raw_data"
 
     # save data to file
     save_data_to_file(spotify_data, output_dir, filename)
 
-    end_time = time.time()  # End timing the main function
+    # end timing the main function
+    end_time = time.time()
     logging.info(f"Total execution time: {end_time - start_time:.2f} seconds")
 
 if __name__ == "__main__":
